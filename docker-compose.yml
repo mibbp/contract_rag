@@ -1,0 +1,192 @@
+version: '3.8'
+
+services:
+  # =========================================
+  # 1. Milvus 套件 (Etcd + MinIO + Standalone)
+  # =========================================
+  etcd:
+    container_name: milvus-etcd
+    image: quay.io/coreos/etcd:v3.5.0
+    environment:
+      - ETCD_AUTO_COMPACTION_MODE=revision
+      - ETCD_AUTO_COMPACTION_RETENTION=1000
+      - ETCD_QUOTA_BACKEND_BYTES=4294967296
+      - ETCD_SNAPSHOT_COUNT=50000
+    volumes:
+      - milvus_etcd_data:/etcd
+    command: etcd -advertise-client-urls=http://127.0.0.1:2379 -listen-client-urls=http://0.0.0.0:2379 -data-dir=/etcd
+    networks:
+      - app_net
+
+  minio:
+    container_name: milvus-minio
+    image: minio/minio:RELEASE.2023-03-20T20-16-18Z
+    environment:
+      MINIO_ACCESS_KEY: ${MINIO_ACCESS_KEY}
+      MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
+    volumes:
+      - milvus_minio_data:/minio_data
+    command: minio server /minio_data --console-address ":9001"
+    networks:
+      - app_net
+    ports:
+      - "9001:9001" # MinIO 控制台
+
+  milvus-standalone:
+    container_name: milvus-standalone
+    image: milvusdb/milvus:v2.3.5
+    command: ["milvus", "run", "standalone"]
+    security_opt:
+      - seccomp:unconfined
+    environment:
+      ETCD_ENDPOINTS: etcd:2379
+      MINIO_ADDRESS: minio:9000
+    volumes:
+      - milvus_data:/var/lib/milvus
+    ports:
+      - "19530:19530" # Milvus 调用端口
+    depends_on:
+      - "etcd"
+      - "minio"
+    networks:
+      - app_net
+  # =========================================
+  # 2. Attu (Milvus 可视化管理工具)
+  # =========================================
+  attu:
+    container_name: attu
+    image: zilliz/attu:v2.3.5
+    environment:
+      # 告诉 Attu 去哪里找 Milvus (这里填容器名)
+      MILVUS_URL: milvus-standalone:19530
+    ports:
+      - "8000:3000" # 浏览器访问 http://localhost:8000
+    depends_on:
+      - milvus-standalone
+    networks:
+      - app_net
+  # =========================================
+  # 2. PostgreSQL 关系型数据库
+  # =========================================
+  postgres:
+    container_name: postgres-db
+    image: postgres:15-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${PGUSER}
+      POSTGRES_PASSWORD: ${PGPWD}
+      POSTGRES_DB: ${PGDB}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - app_net
+
+  # =========================================
+  # Elasticsearch (自定义镜像 + IK)
+  # =========================================
+  elasticsearch:
+    container_name: elasticsearch
+    build:
+      context: ./deploy/es  # 指向刚才创建的文件夹
+      dockerfile: Dockerfile
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false   # 开发环境关闭密码，省事
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"   # 限制内存，防止电脑卡死
+    ports:
+      - "9200:9200"
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    networks:
+      - app_net
+
+  # =========================================
+  # Kibana (可视化管理界面)
+  # =========================================
+  kibana:
+    container_name: kibana_eino
+    image: kibana:8.11.1   # 版本必须与 ES 一致
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - I18N_LOCALE=zh-CN  # 开启汉化（可选）
+    ports:
+      - "5601:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - app_net
+
+  # =========================================
+  # Go 应用
+  # =========================================
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: eino-demo-app
+    ports:
+      - "8081:8081"
+    environment:
+      # PostgreSQL
+      - PGHOST=postgres
+      - PGUSER=${PGUSER}
+      - PGPWD=${PGPWD}
+      - PGDB=${PGDB}
+      - PGPORT=5432
+
+      # Milvus
+      - MILVUSADDR=milvus-standalone:19530
+
+      # Elasticsearch
+      - ESADDR=http://elasticsearch:9200
+
+      # Ollama
+      - OLLAMA_PATH=http://ollama:11434
+    depends_on:
+      - postgres
+      - milvus-standalone
+      - elasticsearch
+      - ollama
+    networks:
+      - app_net
+    restart: unless-stopped
+
+  # =========================================
+  # Ollama (GPU 支持)
+  # =========================================
+  ollama:
+    image: ollama/ollama:latest
+    container_name: eino-demo-ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    networks:
+      - app_net
+    restart: unless-stopped
+
+# =========================================
+# 网络与数据卷
+# =========================================
+networks:
+  app_net:
+    driver: bridge
+
+volumes:
+  milvus_etcd_data:
+  milvus_minio_data:
+  milvus_data:
+  postgres_data:
+  es_data:
+  ollama_data:
