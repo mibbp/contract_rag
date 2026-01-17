@@ -80,7 +80,7 @@ chatflow搭建：
 ## Chain
 ## Graph
 
-
+ollama
 
 # 优化 todo
 
@@ -97,3 +97,6 @@ cdc
 5. 解析
 go原生
 go调用py，grpc + unix socket, py预热， 异步解析+队列
+
+query -> ocr -> 
+
